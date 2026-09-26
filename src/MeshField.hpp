@@ -5,6 +5,7 @@
 #include "MeshField_Element.hpp"
 #include "MeshField_Fail.hpp"
 #include "MeshField_For.hpp"
+#include "MeshField_MappedElement.hpp"
 #include "MeshField_ShapeField.hpp"
 #include "Omega_h_file.hpp"    //move
 #include "Omega_h_mesh.hpp"    //move
@@ -312,6 +313,74 @@ public:
   }
 
   auto getCoordField() { return coordField; }
+
+  /**
+   * @brief create a Lagrange coordinate field of the given order
+   *
+   * @details
+   * Vertex nodes are set from the mesh coordinates and, for order 2, edge
+   * nodes are set to the edge midpoints, so the geometry is straight-sided
+   * until the caller moves the edge nodes.
+   *
+   * @tparam order the order of the coordinate field (1 or 2)
+   * @return the field and its controller; the controller must outlive every
+   * use of the field
+   */
+  template <size_t order> auto CreateLagrangeCoordinateField() const {
+    auto fieldWithCtrlr = CreateLagrangeField<Real, order, dim>();
+    auto field = fieldWithCtrlr.field;
+    const auto coords = mesh.coords();
+    Kokkos::parallel_for(
+        "setVtxCoords", meshInfo.numVtx, KOKKOS_LAMBDA(const int vtx) {
+          for (size_t d = 0; d < dim; ++d)
+            field(vtx, 0, d, MeshField::Vertex) = coords[vtx * dim + d];
+        });
+    if constexpr (order == 2) {
+      const auto edgeVerts = mesh.ask_verts_of(Omega_h::EDGE);
+      Kokkos::parallel_for(
+          "setEdgeCoords", meshInfo.numEdge, KOKKOS_LAMBDA(const int edge) {
+            const auto a = edgeVerts[edge * 2];
+            const auto b = edgeVerts[edge * 2 + 1];
+            for (size_t d = 0; d < dim; ++d)
+              field(edge, 0, d, MeshField::Edge) =
+                  (coords[a * dim + d] + coords[b * dim + d]) / 2;
+          });
+    }
+    return fieldWithCtrlr;
+  }
+
+  /**
+   * @brief create a FieldElement over the mesh elements for a Lagrange field
+   *
+   * @details
+   * The shape and dof map are chosen from the field's order.  The element's
+   * own getJacobians treats the field as coordinates, so use it only when
+   * the field is a coordinate field.
+   */
+  template <typename ShapeField>
+  auto makeElement(const ShapeField &field) const {
+    constexpr int order = ShapeField::Order;
+    static_assert(dim == 2 || dim == 3,
+                  "makeElement supports triangles and tetrahedra");
+    if constexpr (dim == 2) {
+      const auto [shp, map] = Omegah::getTriangleElement<order>(mesh);
+      return MeshField::FieldElement(meshInfo.numTri, field, shp, map);
+    } else {
+      const auto [shp, map] = Omegah::getTetrahedronElement<order>(mesh);
+      return MeshField::FieldElement(meshInfo.numTet, field, shp, map);
+    }
+  }
+
+  /**
+   * @brief create a MappedElement for a field on the given geometry
+   *
+   * @param field the Lagrange field to evaluate
+   * @param geomElem the geometry element: makeElement of a coordinate field
+   */
+  template <typename ShapeField, typename GeomElem>
+  auto makeElement(const ShapeField &field, const GeomElem &geomElem) const {
+    return MeshField::MappedElement(makeElement(field), geomElem);
+  }
 
   // FIXME support 2d and 3d and fields with order>1
   template <typename Field> void writeVtk(Field &field) const {

@@ -323,6 +323,38 @@ struct FieldElement {
     return c;
   }
 
+  /** @brief the Jacobian at one point, row-major with J[i][j] =
+   *  dx_j/dxi_i */
+  using JacobianArray = Kokkos::Array<Real, MeshEntDim * MeshEntDim>;
+
+  /**
+   * @brief
+   * compute the Jacobian at a parametric coordinate from the node coordinates
+   *
+   * @details
+   * The field must be a coordinate field.  Takes the node coordinates as an
+   * argument so that MappedElement can gather them once per element.
+   *
+   * heavily based on SCOREC/core @ 7cd76473 apf/apfVectorElement.cc
+   *
+   * @param x node coordinates from getNodeValues
+   * @param localCoord the parametric coordinate
+   * @return the Jacobian, row-major with J[i][j] = dx_j/dxi_i
+   */
+  KOKKOS_INLINE_FUNCTION JacobianArray jacobianFromNodeValues(
+      NodeArray const &x, Kokkos::Array<Real, MeshEntDim> localCoord) const {
+    const auto grads = shapeFn.getLocalGradients(localCoord);
+    JacobianArray J;
+    for (size_t i = 0; i < MeshEntDim * MeshEntDim; ++i)
+      J[i] = 0;
+    for (size_t n = 0; n < ShapeType::numNodes; ++n)
+      for (size_t i = 0; i < MeshEntDim; ++i)
+        for (size_t j = 0; j < MeshEntDim; ++j)
+          J[i * MeshEntDim + j] +=
+              grads[n * MeshEntDim + i] * x[n * MeshEntDim + j];
+    return J;
+  }
+
   /**
    * @brief
    * compute the Jacobian of an edge
