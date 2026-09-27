@@ -88,6 +88,43 @@ KOKKOS_INLINE_FUNCTION auto addTensorProduct(VecA const &a, VecB const &b,
 
 namespace MeshField {
 
+namespace detail {
+/**
+ * @brief contract coefficients, indexed [node * numComp + component], with the
+ * basis function values at one point
+ */
+template <size_t numNodes, size_t numComp, typename ValArray,
+          typename Coefficients, typename ShapeValues>
+KOKKOS_INLINE_FUNCTION ValArray contractValues(Coefficients const &c,
+                                               ShapeValues const &phi) {
+  ValArray v;
+  for (size_t ci = 0; ci < numComp; ++ci)
+    v[ci] = 0;
+  for (size_t ni = 0; ni < numNodes; ++ni)
+    for (size_t ci = 0; ci < numComp; ++ci)
+      v[ci] += c[ni * numComp + ci] * phi[ni];
+  return v;
+}
+
+/**
+ * @brief contract coefficients, indexed [node * numComp + component], with the
+ * basis function gradients, indexed [node * dim + direction], at one point
+ * @return gradients indexed [component * dim + direction]
+ */
+template <size_t numNodes, size_t numComp, size_t dim, typename GradArray,
+          typename Coefficients, typename ShapeGradients>
+KOKKOS_INLINE_FUNCTION GradArray contractGradients(Coefficients const &c,
+                                                   ShapeGradients const &g) {
+  GradArray grad;
+  for (size_t i = 0; i < numComp * dim; ++i)
+    grad[i] = 0;
+  for (size_t ni = 0; ni < numNodes; ++ni)
+    for (size_t ci = 0; ci < numComp; ++ci)
+      for (size_t d = 0; d < dim; ++d)
+        grad[ci * dim + d] += c[ni * numComp + ci] * g[ni * dim + d];
+  return grad;
+}
+} // namespace detail
 
 //
 
@@ -248,14 +285,8 @@ struct FieldElement {
   template <typename Coefficients>
   KOKKOS_INLINE_FUNCTION ValArray valueFromCoefficients(
       Coefficients const &c, Kokkos::Array<Real, MeshEntDim> localCoord) const {
-    const auto shapeValues = shapeFn.getValues(localCoord);
-    ValArray v;
-    for (size_t ci = 0; ci < NumComponents; ++ci)
-      v[ci] = 0;
-    for (size_t ni = 0; ni < ShapeType::numNodes; ++ni)
-      for (size_t ci = 0; ci < NumComponents; ++ci)
-        v[ci] += c[ni * NumComponents + ci] * shapeValues[ni];
-    return v;
+    return detail::contractValues<ShapeType::numNodes, NumComponents, ValArray>(
+        c, shapeFn.getValues(localCoord));
   }
 
   /**
@@ -291,15 +322,8 @@ struct FieldElement {
   template <typename Coefficients, typename ShapeGradients>
   KOKKOS_INLINE_FUNCTION LocalGradArray localGradientFromShapeGradients(
       Coefficients const &c, ShapeGradients const &shapeGrads) const {
-    LocalGradArray g;
-    for (size_t i = 0; i < NumComponents * MeshEntDim; ++i)
-      g[i] = 0;
-    for (size_t ni = 0; ni < ShapeType::numNodes; ++ni)
-      for (size_t ci = 0; ci < NumComponents; ++ci)
-        for (size_t d = 0; d < MeshEntDim; ++d)
-          g[ci * MeshEntDim + d] +=
-              c[ni * NumComponents + ci] * shapeGrads[ni * MeshEntDim + d];
-    return g;
+    return detail::contractGradients<ShapeType::numNodes, NumComponents,
+                                     MeshEntDim, LocalGradArray>(c, shapeGrads);
   }
 
   /**

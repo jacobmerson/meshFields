@@ -18,6 +18,10 @@
 //    differences on the right.
 // 3. measure through the Integrator: bulging boundary edge nodes by s adds
 //    (2/3)*chord*s of area per edge (2d); shearing keeps the volume (3d).
+// 4. a DofTransformation whose reference basis differs from the stored dofs:
+//    P1 dofs interpolated onto the P2 nodes, plus a bubble b = xi0*xi1 that
+//    only the P2 basis represents, must give the P1 values plus b and the P1
+//    gradients plus the mapped gradient of b.
 
 using ExecutionSpace = Kokkos::DefaultExecutionSpace;
 template <size_t dim> using Vec = Kokkos::Array<MeshField::Real, dim>;
@@ -297,6 +301,98 @@ bool testMeasure(Omega_h::Mesh &mesh, OmegahMeshField<dim> &omf) {
   return pass;
 }
 
+// parametric bubble xi0*xi1: zero at the vertices, in P2
+template <size_t dim>
+KOKKOS_INLINE_FUNCTION MeshField::Real bubble(Vec<dim> xi) {
+  return xi[0] * xi[1];
+}
+
+// interpolates the stored dofs plus (c+1)*bubble onto the nodes of a Lagrange
+// RefShape, so the coefficients are for a different basis than the stored
+// dofs and use all of its nodes
+template <typename RefShape> struct InterpolateToShape {
+  template <typename FieldElem> using ReferenceShape = RefShape;
+
+  template <typename FieldElem, typename GeomElem>
+  KOKKOS_INLINE_FUNCTION auto coefficients(FieldElem const &field,
+                                           GeomElem const &, int ent) const {
+    constexpr size_t dim = FieldElem::MeshEntDim;
+    constexpr size_t numComp = FieldElem::NumComponents;
+    const auto d = field.coefficients(ent);
+    const auto nodes = RefShape{}.getNodeParametricCoords();
+    Kokkos::Array<MeshField::Real, RefShape::numNodes * numComp> c;
+    for (size_t n = 0; n < RefShape::numNodes; ++n) {
+      Vec<dim> xi;
+      for (size_t k = 0; k < dim; ++k)
+        xi[k] = nodes[n * dim + k];
+      const auto v = field.valueFromCoefficients(d, xi);
+      for (size_t ci = 0; ci < numComp; ++ci)
+        c[n * numComp + ci] = v[ci] + (ci + 1) * bubble<dim>(xi);
+    }
+    return c;
+  }
+};
+
+// 4. P1 dofs plus a bubble on a P2 reference basis
+template <size_t dim>
+bool testReferenceShape(Omega_h::Mesh &mesh, OmegahMeshField<dim> &omf) {
+  using P2Shape =
+      std::conditional_t<dim == 2, MeshField::QuadraticTriangleShape,
+                         MeshField::QuadraticTetrahedronShape>;
+  auto cfWc = omf.template CreateLagrangeCoordinateField<1>();
+  shear<dim>(mesh, cfWc.field);
+  constexpr size_t numComp = 2;
+  auto fieldWc =
+      omf.template CreateLagrangeField<MeshField::Real, 1, numComp>();
+  setField<dim>(mesh, LinearFunction<dim>(), fieldWc.field, cfWc.field);
+
+  auto geomElm = omf.makeElement(cfWc.field);
+  auto p1 = omf.makeElement(fieldWc.field, geomElm);
+  auto onP2 = MeshField::MappedElement(omf.makeElement(fieldWc.field), geomElm,
+                                       InterpolateToShape<P2Shape>{});
+  static_assert(sizeof(decltype(onP2.coefficients(0))) ==
+                P2Shape::numNodes * numComp * sizeof(MeshField::Real));
+
+  MeshField::LO errors = 0;
+  Kokkos::parallel_reduce(
+      "checkReferenceShape", mesh.nelems(),
+      KOKKOS_LAMBDA(const int ent, MeshField::LO &lerr) {
+        const auto c1 = p1.coefficients(ent);
+        const auto c2 = onP2.coefficients(ent);
+        const auto geo = p1.geometry(ent);
+        for (int pt = 0; pt < numPts; ++pt) {
+          const auto xi = point<dim>(pt);
+          const auto v1 = p1.valueFromCoefficients(c1, xi);
+          const auto v2 = onP2.valueFromCoefficients(c2, xi);
+          const auto g1 = p1.gradientFromCoefficients(c1, geo, xi);
+          const auto g2 = onP2.gradientFromCoefficients(c2, geo, xi);
+          // physical gradient of the bubble, for each component
+          Kokkos::Array<MeshField::Real, numComp * dim> localBubbleGrad;
+          for (size_t ci = 0; ci < numComp; ++ci)
+            for (size_t d = 0; d < dim; ++d)
+              localBubbleGrad[ci * dim + d] =
+                  (ci + 1) * (d == 0 ? xi[1] : (d == 1 ? xi[0] : 0.0));
+          const auto bubbleGrad =
+              MeshField::IdentityMap{}.gradient(localBubbleGrad, geo);
+          for (size_t ci = 0; ci < numComp; ++ci) {
+            const auto expected = v1[ci] + (ci + 1) * bubble<dim>(xi);
+            if (!(Kokkos::fabs(v2[ci] - expected) <= MeshField::Epsilon))
+              lerr++;
+            for (size_t d = 0; d < dim; ++d)
+              if (!(Kokkos::fabs(
+                        g2[ci * dim + d] -
+                        (g1[ci * dim + d] + bubbleGrad[ci * dim + d])) <=
+                    MeshField::Epsilon))
+                lerr++;
+          }
+        }
+      },
+      errors);
+  std::cout << "testReferenceShape(" << dim
+            << "d): " << (errors ? "FAIL" : "pass") << "\n";
+  return errors == 0;
+}
+
 template <size_t dim> int runTests(Omega_h::Mesh &mesh) {
   OmegahMeshField<dim> omf(mesh);
   int failed = 0;
@@ -305,6 +401,7 @@ template <size_t dim> int runTests(Omega_h::Mesh &mesh) {
   failed += !testCurvedGradientFiniteDifference<dim, 1>(mesh, omf);
   failed += !testCurvedGradientFiniteDifference<dim, 2>(mesh, omf);
   failed += !testMeasure<dim>(mesh, omf);
+  failed += !testReferenceShape<dim>(mesh, omf);
   return failed;
 }
 

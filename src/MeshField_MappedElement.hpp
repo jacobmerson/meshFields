@@ -81,15 +81,24 @@ invert(Kokkos::Array<Real, Dim * Dim> const &A) {
  * @details
  * Correct for every Lagrange element.  A DofTransformation must provide
  * @code
+ * template <typename FieldElem> using ReferenceShape = ...;
+ *
  * template <typename FieldElem, typename GeomElem>
  * KOKKOS_INLINE_FUNCTION auto
  * coefficients(FieldElem const &field, GeomElem const &geom, int ent) const;
  * @endcode
- * returning coefficients indexed `[node * NumComponents + component]`.  It
- * takes no parametric coordinate: the transformation depends only on the
- * element, so it is computed once per element and reused at every point.
+ * ReferenceShape is the basis the coefficients are for.  It can differ from
+ * the field's shape, which describes the stored dofs: the Bell element stores
+ * 18 dofs but its reference basis has 21 functions.  coefficients returns
+ * ReferenceShape::numNodes coefficients per component, indexed
+ * `[node * NumComponents + component]`.  It takes no parametric coordinate:
+ * the transformation depends only on the element, so it is computed once per
+ * element and reused at every point.
  */
 struct IdentityDofTransformation {
+  template <typename FieldElem>
+  using ReferenceShape = typename FieldElem::Shape;
+
   template <typename FieldElem, typename GeomElem>
   KOKKOS_INLINE_FUNCTION auto coefficients(FieldElem const &field,
                                            GeomElem const &, int ent) const {
@@ -194,6 +203,10 @@ struct MappedElement {
   using Shape = typename FieldElem::Shape;
   using DofMap = typename FieldElem::DofMap;
   using GeometryShape = typename GeomElem::Shape;
+  /** @brief the basis the coefficients are for; see IdentityDofTransformation
+   */
+  using ReferenceShape =
+      typename DofTransformation::template ReferenceShape<FieldElem>;
   /** @brief physical gradients at one point, indexed
    *  [component * MeshEntDim + direction] */
   using GradArray = typename FieldElem::LocalGradArray;
@@ -206,7 +219,7 @@ struct MappedElement {
   static constexpr bool IsAffine = GeometryShape::Order == 1;
   /** @brief the field and geometry use the same shape functions and dof map */
   static constexpr bool IsIsoparametric =
-      std::is_same_v<Shape, GeometryShape> &&
+      std::is_same_v<ReferenceShape, GeometryShape> &&
       std::is_same_v<DofMap, typename GeomElem::DofMap>;
 
   /** @brief the field's coefficients on the reference basis for one element,
@@ -260,7 +273,9 @@ struct MappedElement {
   /** @brief the physical value of the field at a parametric coordinate */
   KOKKOS_INLINE_FUNCTION ValArray valueFromCoefficients(
       Coefficients const &c, Kokkos::Array<Real, MeshEntDim> localCoord) const {
-    return mapType.value(field.valueFromCoefficients(c, localCoord));
+    return mapType.value(detail::contractValues<ReferenceShape::numNodes,
+                                                NumComponents, ValArray>(
+        c, ReferenceShape{}.getValues(localCoord)));
   }
 
   /** @brief the Jacobian of the geometry at a parametric coordinate */
@@ -277,15 +292,16 @@ struct MappedElement {
   KOKKOS_INLINE_FUNCTION GradArray
   gradientFromCoefficients(Coefficients const &c, Geometry const &g,
                            Kokkos::Array<Real, MeshEntDim> localCoord) const {
+    const auto grads = ReferenceShape{}.getLocalGradients(localCoord);
+    const auto localGrad =
+        detail::contractGradients<ReferenceShape::numNodes, NumComponents,
+                                  MeshEntDim, GradArray>(c, grads);
     if constexpr (IsIsoparametric && !IsAffine) {
       // the field and the geometry share the shape function gradients
-      const auto grads = field.shapeFn.getLocalGradients(localCoord);
-      return mapType.gradient(field.localGradientFromShapeGradients(c, grads),
+      return mapType.gradient(localGrad,
                               geom.jacobianFromShapeGradients(g, grads));
     } else {
-      return mapType.gradient(
-          field.localGradientFromCoefficients(c, localCoord),
-          jacobianFromGeometry(g, localCoord));
+      return mapType.gradient(localGrad, jacobianFromGeometry(g, localCoord));
     }
   }
 
