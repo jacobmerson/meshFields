@@ -4,13 +4,15 @@
 #include "Omega_h_build.hpp"
 #include <Kokkos_Core.hpp>
 #include <iostream>
+#include <type_traits>
 
 // MappedElement tests on triangles and tetrahedra.  The meshes are sheared so
 // the Jacobians are full matrices.
 //
-// 1. P2 field on P1 geometry: the map is affine, so a P2 field that
-//    interpolates a quadratic f reproduces f and grad f exactly.  Component c
-//    of the field is (c+1)*f, which checks the component ordering.
+// 1. P1 and P2 fields on P1 geometry: the map is affine, so a field that
+//    interpolates a linear (P1) or quadratic (P2) f reproduces f and grad f
+//    exactly.  Component c of the field is (c+1)*f, which checks the
+//    component ordering.
 // 2. finite differences on curved P2 geometry: for P1 and P2 fields the
 //    physical gradient g must satisfy dx/dxi_k . g = dv/dxi_k, with central
 //    differences on the right.
@@ -21,6 +23,21 @@ using ExecutionSpace = Kokkos::DefaultExecutionSpace;
 template <size_t dim> using Vec = Kokkos::Array<MeshField::Real, dim>;
 template <size_t dim>
 using OmegahMeshField = MeshField::OmegahMeshField<ExecutionSpace, dim>;
+
+template <size_t dim> struct LinearFunction {
+  KOKKOS_INLINE_FUNCTION MeshField::Real operator()(Vec<dim> x) const {
+    MeshField::Real f = 0;
+    for (size_t d = 0; d < dim; ++d)
+      f += (d + 2.0) * x[d];
+    return f;
+  }
+  KOKKOS_INLINE_FUNCTION Vec<dim> grad(Vec<dim>) const {
+    Vec<dim> g;
+    for (size_t d = 0; d < dim; ++d)
+      g[d] = d + 2.0;
+    return g;
+  }
+};
 
 template <size_t dim> struct QuadraticFunction {
   KOKKOS_INLINE_FUNCTION MeshField::Real operator()(Vec<dim> x) const {
@@ -110,18 +127,20 @@ void setField(Omega_h::Mesh &mesh, Func func, Field field, CoordField cf) {
       });
 }
 
-// 1. P2 field on P1 geometry reproduces a quadratic exactly
-template <size_t dim>
-bool testP2FieldOnP1Geometry(Omega_h::Mesh &mesh, OmegahMeshField<dim> &omf) {
-  QuadraticFunction<dim> func;
+// 1. a field on P1 geometry reproduces a polynomial of its order exactly
+template <size_t dim, size_t FieldOrder>
+bool testFieldOnP1Geometry(Omega_h::Mesh &mesh, OmegahMeshField<dim> &omf) {
+  std::conditional_t<FieldOrder == 1, LinearFunction<dim>,
+                     QuadraticFunction<dim>>
+      func;
   auto cf1Wc = omf.template CreateLagrangeCoordinateField<1>();
-  auto cf2Wc = omf.template CreateLagrangeCoordinateField<2>();
+  auto nodeCoordsWc = omf.template CreateLagrangeCoordinateField<FieldOrder>();
   shear<dim>(mesh, cf1Wc.field);
-  shear<dim>(mesh, cf2Wc.field);
+  shear<dim>(mesh, nodeCoordsWc.field);
   constexpr size_t numComp = 2;
   auto fieldWc =
-      omf.template CreateLagrangeField<MeshField::Real, 2, numComp>();
-  setField<dim>(mesh, func, fieldWc.field, cf2Wc.field);
+      omf.template CreateLagrangeField<MeshField::Real, FieldOrder, numComp>();
+  setField<dim>(mesh, func, fieldWc.field, nodeCoordsWc.field);
 
   auto geomElm = omf.makeElement(cf1Wc.field);
   auto elm = omf.makeElement(fieldWc.field, geomElm);
@@ -129,7 +148,7 @@ bool testP2FieldOnP1Geometry(Omega_h::Mesh &mesh, OmegahMeshField<dim> &omf) {
 
   MeshField::LO errors = 0;
   Kokkos::parallel_reduce(
-      "checkP2FieldOnP1Geometry", mesh.nelems(),
+      "checkFieldOnP1Geometry", mesh.nelems(),
       KOKKOS_LAMBDA(const int ent, MeshField::LO &lerr) {
         const auto c = elm.coefficients(ent);
         const auto cx = coordElm.coefficients(ent);
@@ -154,8 +173,8 @@ bool testP2FieldOnP1Geometry(Omega_h::Mesh &mesh, OmegahMeshField<dim> &omf) {
         }
       },
       errors);
-  std::cout << "testP2FieldOnP1Geometry(" << dim
-            << "d): " << (errors ? "FAIL" : "pass") << "\n";
+  std::cout << "testFieldOnP1Geometry(" << dim << "d, P" << FieldOrder
+            << " field): " << (errors ? "FAIL" : "pass") << "\n";
   return errors == 0;
 }
 
@@ -279,7 +298,8 @@ bool testMeasure(Omega_h::Mesh &mesh, OmegahMeshField<dim> &omf) {
 template <size_t dim> int runTests(Omega_h::Mesh &mesh) {
   OmegahMeshField<dim> omf(mesh);
   int failed = 0;
-  failed += !testP2FieldOnP1Geometry<dim>(mesh, omf);
+  failed += !testFieldOnP1Geometry<dim, 1>(mesh, omf);
+  failed += !testFieldOnP1Geometry<dim, 2>(mesh, omf);
   failed += !testCurvedGradientFiniteDifference<dim, 1>(mesh, omf);
   failed += !testCurvedGradientFiniteDifference<dim, 2>(mesh, omf);
   failed += !testMeasure<dim>(mesh, omf);

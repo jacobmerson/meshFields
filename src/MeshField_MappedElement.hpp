@@ -5,6 +5,7 @@
 #include <MeshField_Defines.hpp>
 #include <MeshField_Element.hpp>
 #include <MeshField_Fail.hpp>
+#include <type_traits>
 #include <utility> // std::declval
 
 /**
@@ -196,14 +197,24 @@ struct MappedElement {
    *  dx_j/dxi_i */
   using JacobianArray = typename GeomElem::JacobianArray;
 
+  /** @brief the geometry map is affine, so the Jacobian is constant over
+   *  each element */
+  static constexpr bool IsAffine = GeometryShape::Order == 1;
+  /** @brief the field and geometry use the same shape functions and dof map */
+  static constexpr bool IsIsoparametric =
+      std::is_same_v<Shape, GeometryShape> &&
+      std::is_same_v<DofMap, typename GeomElem::DofMap>;
+
   /** @brief everything about one element that does not depend on the
    *  evaluation point */
   struct Coefficients {
     /** coefficients on the reference basis, from the DofTransformation */
     decltype(std::declval<DofTransformation>().coefficients(
         std::declval<FieldElem>(), std::declval<GeomElem>(), 0)) field;
-    /** the geometry element's node coordinates */
-    typename GeomElem::NodeArray geometry;
+    /** the Jacobian for affine geometry, which needs fewer values than the
+     *  node coordinates; otherwise the node coordinates */
+    std::conditional_t<IsAffine, JacobianArray, typename GeomElem::NodeArray>
+        geometry;
   };
 
   MappedElement(
@@ -226,8 +237,14 @@ struct MappedElement {
    * the *FromCoefficients functions for each point.
    */
   KOKKOS_INLINE_FUNCTION Coefficients coefficients(int ent) const {
-    return {dofTransformation.coefficients(field, geom, ent),
-            geom.getNodeValues(ent)};
+    if constexpr (IsAffine) {
+      return {dofTransformation.coefficients(field, geom, ent),
+              geom.jacobianFromNodeValues(geom.getNodeValues(ent),
+                                          Kokkos::Array<Real, MeshEntDim>{})};
+    } else {
+      return {dofTransformation.coefficients(field, geom, ent),
+              geom.getNodeValues(ent)};
+    }
   }
 
   /** @brief the physical value of the field at a parametric coordinate */
@@ -239,15 +256,27 @@ struct MappedElement {
   /** @brief the Jacobian of the geometry at a parametric coordinate */
   KOKKOS_INLINE_FUNCTION JacobianArray jacobianFromCoefficients(
       Coefficients const &c, Kokkos::Array<Real, MeshEntDim> localCoord) const {
-    return geom.jacobianFromNodeValues(c.geometry, localCoord);
+    if constexpr (IsAffine) {
+      return c.geometry;
+    } else {
+      return geom.jacobianFromNodeValues(c.geometry, localCoord);
+    }
   }
 
   /** @brief the physical gradient of the field at a parametric coordinate */
   KOKKOS_INLINE_FUNCTION GradArray gradientFromCoefficients(
       Coefficients const &c, Kokkos::Array<Real, MeshEntDim> localCoord) const {
-    return mapType.gradient(
-        field.localGradientFromCoefficients(c.field, localCoord),
-        jacobianFromCoefficients(c, localCoord));
+    if constexpr (IsIsoparametric && !IsAffine) {
+      // the field and the geometry share the shape function gradients
+      const auto grads = field.shapeFn.getLocalGradients(localCoord);
+      return mapType.gradient(
+          field.localGradientFromShapeGradients(c.field, grads),
+          geom.jacobianFromShapeGradients(c.geometry, grads));
+    } else {
+      return mapType.gradient(
+          field.localGradientFromCoefficients(c.field, localCoord),
+          jacobianFromCoefficients(c, localCoord));
+    }
   }
 
   /**
