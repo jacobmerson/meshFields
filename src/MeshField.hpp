@@ -33,30 +33,6 @@ MeshField::MeshInfo getMeshInfo(Omega_h::Mesh &mesh) {
   return meshInfo;
 }
 
-template <typename ExecutionSpace, size_t dim,
-          template <typename...>
-          typename Controller = MeshField::KokkosController>
-decltype(MeshField::CreateCoordinateField<ExecutionSpace, Controller, dim>(
-    MeshField::MeshInfo()))
-createCoordinateField(const MeshField::MeshInfo &mesh_info,
-                      Omega_h::Reals coords) {
-  const auto meshDim = mesh_info.dim;
-  auto coordFieldWithCtrlr =
-      MeshField::CreateCoordinateField<ExecutionSpace, Controller, dim>(
-          mesh_info);
-  auto coordField = coordFieldWithCtrlr.field;
-  auto setCoordField = KOKKOS_LAMBDA(const int &i) {
-    coordField(i, 0, 0, MeshField::Vertex) = coords[i * meshDim];
-    coordField(i, 0, 1, MeshField::Vertex) = coords[i * meshDim + 1];
-    if constexpr (dim == 3) {
-      coordField(i, 0, 2, MeshField::Vertex) = coords[i * meshDim + 2];
-    }
-  };
-  MeshField::parallel_for(ExecutionSpace(), {0}, {mesh_info.numVtx},
-                          setCoordField, "setCoordField");
-  return coordFieldWithCtrlr;
-}
-
 } // anonymous namespace
 
 namespace MeshField {
@@ -293,15 +269,15 @@ private:
   Omega_h::Mesh &mesh;
   const MeshField::MeshInfo meshInfo;
   using CoordField =
-      decltype(createCoordinateField<ExecutionSpace, dim, Controller>(
-          MeshField::MeshInfo(), Omega_h::Reals()));
+      decltype(MeshField::CreateLagrangeField<ExecutionSpace, Controller, Real,
+                                              1, dim, dim>(
+          MeshField::MeshInfo()));
   CoordField coordField;
 
 public:
   OmegahMeshField(Omega_h::Mesh &mesh_in)
       : mesh(mesh_in), meshInfo(getMeshInfo(mesh)),
-        coordField(createCoordinateField<ExecutionSpace, dim, Controller>(
-            getMeshInfo(mesh_in), mesh_in.coords())) {
+        coordField(CreateLagrangeCoordinateField<1>()) {
     static_assert(dim == 1 || dim == 2 || dim == 3);
   }
 
