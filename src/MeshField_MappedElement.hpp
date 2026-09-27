@@ -117,6 +117,8 @@ struct IdentityDofTransformation {
  *  - `gradient(refGrad, J)`: physical gradients, indexed
  *    `[component * Dim + direction]`, from gradients with respect to the
  *    parametric coordinates and the Jacobian at the same point
+ *  - optionally `hessian(refHess, J)`: physical Hessians from Hessians with
+ *    respect to the parametric coordinates, for affine geometry
  *
  * The Piola maps also need the Jacobian for values; `value` will gain a
  * Jacobian argument when the first of them is added.
@@ -151,6 +153,56 @@ struct IdentityMap {
       }
     }
     return g;
+  }
+
+  /**
+   * @details
+   * For affine geometry J is constant, and the chain rule gives
+   * H_xi = J H_x J^T, so H_x = J^{-1} H_xi J^{-T} for each component.  The
+   * Hessians are packed symmetric matrices, (xx, xy, yy) in 2d and
+   * (xx, xy, xz, yy, yz, zz) in 3d, for each component.  On curved geometry
+   * the second derivatives of the geometry map add a term, which is not
+   * implemented.
+   */
+  template <typename HessArray, typename JacobianArray>
+  KOKKOS_INLINE_FUNCTION HessArray hessian(HessArray const &refHess,
+                                           JacobianArray const &J) const {
+    constexpr size_t Dim = JacobianArray::size() == 1   ? 1
+                           : JacobianArray::size() == 4 ? 2
+                                                        : 3;
+    static_assert(Dim * Dim == JacobianArray::size());
+    constexpr size_t numSym = Dim * (Dim + 1) / 2;
+    constexpr auto numComp = HessArray::size() / numSym;
+    // index of entry (i, j), i <= j, in a packed symmetric matrix
+    const auto packed = [](size_t i, size_t j) {
+      if (i > j) {
+        const size_t t = i;
+        i = j;
+        j = t;
+      }
+      return i * Dim - i * (i - 1) / 2 + (j - i);
+    };
+    const auto Jinv = detail::invert<Dim>(J);
+    HessArray h;
+    for (size_t ci = 0; ci < numComp; ++ci) {
+      // (J^{-1} H_xi)[i][l]
+      Real JH[Dim][Dim];
+      for (size_t i = 0; i < Dim; ++i)
+        for (size_t l = 0; l < Dim; ++l) {
+          Real sum = 0;
+          for (size_t j = 0; j < Dim; ++j)
+            sum += Jinv[i * Dim + j] * refHess[ci * numSym + packed(j, l)];
+          JH[i][l] = sum;
+        }
+      for (size_t i = 0; i < Dim; ++i)
+        for (size_t k = i; k < Dim; ++k) {
+          Real sum = 0;
+          for (size_t l = 0; l < Dim; ++l)
+            sum += JH[i][l] * Jinv[k * Dim + l];
+          h[ci * numSym + packed(i, k)] = sum;
+        }
+    }
+    return h;
   }
 };
 
@@ -210,6 +262,10 @@ struct MappedElement {
   /** @brief physical gradients at one point, indexed
    *  [component * MeshEntDim + direction] */
   using GradArray = typename FieldElem::LocalGradArray;
+  /** @brief physical Hessians at one point, packed symmetric per component;
+   *  see IdentityMap::hessian */
+  using HessArray =
+      Kokkos::Array<Real, NumComponents * MeshEntDim *(MeshEntDim + 1) / 2>;
   /** @brief the Jacobian at one point, row-major with J[i][j] =
    *  dx_j/dxi_i */
   using JacobianArray = typename GeomElem::JacobianArray;
@@ -303,6 +359,27 @@ struct MappedElement {
     } else {
       return mapType.gradient(localGrad, jacobianFromGeometry(g, localCoord));
     }
+  }
+
+  /**
+   * @brief the physical Hessian of the field at a parametric coordinate
+   *
+   * @details
+   * Needs a reference shape with getLocalHessians and a MapType with hessian.
+   * Only affine geometry is supported.
+   */
+  KOKKOS_INLINE_FUNCTION HessArray
+  hessianFromCoefficients(Coefficients const &c, Geometry const &g,
+                          Kokkos::Array<Real, MeshEntDim> localCoord) const {
+    static_assert(IsAffine,
+                  "Hessians are only implemented for affine geometry");
+    constexpr size_t numSym = MeshEntDim * (MeshEntDim + 1) / 2;
+    // the same contraction as for gradients, over the packed Hessian entries
+    const auto refHess =
+        detail::contractGradients<ReferenceShape::numNodes, NumComponents,
+                                  numSym, HessArray>(
+            c, ReferenceShape{}.getLocalHessians(localCoord));
+    return mapType.hessian(refHess, g);
   }
 
   /**
