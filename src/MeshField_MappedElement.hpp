@@ -157,13 +157,17 @@ struct IdentityMap {
  * evaluated.  An isoparametric Lagrange element is the case where both use
  * the same shape and both policies are the identity.
  *
- * Evaluation is two-phase, like FieldElement:
+ * Evaluation is two-phase, like FieldElement.  The field coefficients and the
+ * geometry are gathered separately, once per element, so that code that only
+ * evaluates values never reads the geometry:
  * @code
- * const auto c = elm.coefficients(ent);              // once per element
- * for (pt : points) elm.valueFromCoefficients(c, xi); // once per point
+ * const auto c = elm.coefficients(ent);                  // once per element
+ * const auto g = elm.geometry(ent);                      // if needed
+ * for (pt : points) {
+ *   elm.valueFromCoefficients(c, xi);                    // values
+ *   elm.gradientFromCoefficients(c, g, xi);              // gradients
+ * }
  * @endcode
- * The coefficients include the geometry's node coordinates, so they are also
- * gathered once per element.
  *
  * @tparam FieldElem a FieldElement over the field being evaluated
  * @tparam GeomElem a FieldElement over the coordinate field
@@ -205,17 +209,15 @@ struct MappedElement {
       std::is_same_v<Shape, GeometryShape> &&
       std::is_same_v<DofMap, typename GeomElem::DofMap>;
 
-  /** @brief everything about one element that does not depend on the
-   *  evaluation point */
-  struct Coefficients {
-    /** coefficients on the reference basis, from the DofTransformation */
-    decltype(std::declval<DofTransformation>().coefficients(
-        std::declval<FieldElem>(), std::declval<GeomElem>(), 0)) field;
-    /** the Jacobian for affine geometry, which needs fewer values than the
-     *  node coordinates; otherwise the node coordinates */
-    std::conditional_t<IsAffine, JacobianArray, typename GeomElem::NodeArray>
-        geometry;
-  };
+  /** @brief the field's coefficients on the reference basis for one element,
+   *  from the DofTransformation */
+  using Coefficients = decltype(std::declval<DofTransformation>().coefficients(
+      std::declval<FieldElem>(), std::declval<GeomElem>(), 0));
+  /** @brief the geometry of one element: the Jacobian for affine geometry,
+   *  which needs fewer values than the node coordinates; otherwise the node
+   *  coordinates */
+  using Geometry =
+      std::conditional_t<IsAffine, JacobianArray, typename GeomElem::NodeArray>;
 
   MappedElement(
       FieldElem const &fieldIn, GeomElem const &geomIn,
@@ -231,51 +233,59 @@ struct MappedElement {
   }
 
   /**
-   * @brief the coefficients and geometry of one element
+   * @brief the field's coefficients for one element
    *
    * Depends only on the element; compute it once per element and pass it to
    * the *FromCoefficients functions for each point.
    */
   KOKKOS_INLINE_FUNCTION Coefficients coefficients(int ent) const {
+    return dofTransformation.coefficients(field, geom, ent);
+  }
+
+  /**
+   * @brief the geometry of one element, for gradients and Jacobians
+   *
+   * Depends only on the element; compute it once per element, and only when
+   * gradients or Jacobians are needed.
+   */
+  KOKKOS_INLINE_FUNCTION Geometry geometry(int ent) const {
     if constexpr (IsAffine) {
-      return {dofTransformation.coefficients(field, geom, ent),
-              geom.jacobianFromNodeValues(geom.getNodeValues(ent),
-                                          Kokkos::Array<Real, MeshEntDim>{})};
+      return geom.jacobianFromNodeValues(geom.getNodeValues(ent),
+                                         Kokkos::Array<Real, MeshEntDim>{});
     } else {
-      return {dofTransformation.coefficients(field, geom, ent),
-              geom.getNodeValues(ent)};
+      return geom.getNodeValues(ent);
     }
   }
 
   /** @brief the physical value of the field at a parametric coordinate */
   KOKKOS_INLINE_FUNCTION ValArray valueFromCoefficients(
       Coefficients const &c, Kokkos::Array<Real, MeshEntDim> localCoord) const {
-    return mapType.value(field.valueFromCoefficients(c.field, localCoord));
+    return mapType.value(field.valueFromCoefficients(c, localCoord));
   }
 
   /** @brief the Jacobian of the geometry at a parametric coordinate */
-  KOKKOS_INLINE_FUNCTION JacobianArray jacobianFromCoefficients(
-      Coefficients const &c, Kokkos::Array<Real, MeshEntDim> localCoord) const {
+  KOKKOS_INLINE_FUNCTION JacobianArray jacobianFromGeometry(
+      Geometry const &g, Kokkos::Array<Real, MeshEntDim> localCoord) const {
     if constexpr (IsAffine) {
-      return c.geometry;
+      return g;
     } else {
-      return geom.jacobianFromNodeValues(c.geometry, localCoord);
+      return geom.jacobianFromNodeValues(g, localCoord);
     }
   }
 
   /** @brief the physical gradient of the field at a parametric coordinate */
-  KOKKOS_INLINE_FUNCTION GradArray gradientFromCoefficients(
-      Coefficients const &c, Kokkos::Array<Real, MeshEntDim> localCoord) const {
+  KOKKOS_INLINE_FUNCTION GradArray
+  gradientFromCoefficients(Coefficients const &c, Geometry const &g,
+                           Kokkos::Array<Real, MeshEntDim> localCoord) const {
     if constexpr (IsIsoparametric && !IsAffine) {
       // the field and the geometry share the shape function gradients
       const auto grads = field.shapeFn.getLocalGradients(localCoord);
-      return mapType.gradient(
-          field.localGradientFromShapeGradients(c.field, grads),
-          geom.jacobianFromShapeGradients(c.geometry, grads));
+      return mapType.gradient(field.localGradientFromShapeGradients(c, grads),
+                              geom.jacobianFromShapeGradients(g, grads));
     } else {
       return mapType.gradient(
-          field.localGradientFromCoefficients(c.field, localCoord),
-          jacobianFromCoefficients(c, localCoord));
+          field.localGradientFromCoefficients(c, localCoord),
+          jacobianFromGeometry(g, localCoord));
     }
   }
 
