@@ -2,6 +2,7 @@
 #define MESHFIELD_MESHFIELD_HPP
 
 #include "KokkosController.hpp"
+#include "MeshField_Bell.hpp"
 #include "MeshField_Element.hpp"
 #include "MeshField_Fail.hpp"
 #include "MeshField_For.hpp"
@@ -259,6 +260,30 @@ template <int ShapeOrder> auto getTetrahedronElement(Omega_h::Mesh &mesh) {
   }
 }
 
+/**
+ * @brief Bell field dofs of a triangle: element node n is node n % 6 of the
+ * triangle's vertex n / 6, with the vertices ordered as by
+ * LinearTriangleToVertexField so that they match a linear geometry element
+ */
+struct BellTriangleToVertexField {
+  LinearTriangleToVertexField vertices;
+  BellTriangleToVertexField(Omega_h::Mesh &mesh) : vertices(mesh) {}
+
+  static constexpr KOKKOS_FUNCTION Kokkos::Array<MeshField::Mesh_Topology, 1>
+  getTopology() {
+    return {MeshField::Triangle};
+  }
+
+  KOKKOS_FUNCTION MeshField::ElementToDofHolderMap
+  operator()(MeshField::LO triNodeIdx, MeshField::LO triCompIdx,
+             MeshField::LO tri, MeshField::Mesh_Topology topo) const {
+    constexpr MeshField::LO nv = MeshField::BellTriangleShape::nodesPerVertex;
+    auto map = vertices(triNodeIdx / nv, triCompIdx, tri, topo);
+    map.node = triNodeIdx % nv;
+    return map;
+  }
+};
+
 } // namespace Omegah
 
 template <typename ExecutionSpace, size_t dim,
@@ -326,19 +351,37 @@ public:
   }
 
   /**
-   * @brief create a FieldElement over the mesh elements for a Lagrange field
+   * @brief create a Bell field: the value, gradient, and Hessian of each
+   * component at each vertex; see MeshField::CreateBellField
+   *
+   * @tparam numComp the number of physical components
+   */
+  template <size_t numComp> auto CreateBellField() const {
+    static_assert(dim == 2, "Bell fields need a 2d mesh");
+    return MeshField::CreateBellField<ExecutionSpace, Controller, Real,
+                                      numComp>(meshInfo);
+  }
+
+  /**
+   * @brief create a FieldElement over the mesh elements for a Lagrange or
+   * Bell field
    *
    * @details
-   * The shape and dof map are chosen from the field's order.  The element's
-   * own getJacobians treats the field as coordinates, so use it only when
-   * the field is a coordinate field.
+   * The shape and dof map are chosen from the field's shape and order.  The
+   * element's own getJacobians treats the field as coordinates, so use it only
+   * when the field is a coordinate field.  A Bell field's element only gathers
+   * its dofs; evaluate it through makeElement(field, geomElem).
    */
   template <typename ShapeField>
   auto makeElement(const ShapeField &field) const {
     constexpr int order = ShapeField::Order;
     static_assert(dim == 2 || dim == 3,
                   "makeElement supports triangles and tetrahedra");
-    if constexpr (dim == 2) {
+    if constexpr (isBell<ShapeField>()) {
+      return MeshField::FieldElement(meshInfo.numTri, field,
+                                     MeshField::BellTriangleShape(),
+                                     Omegah::BellTriangleToVertexField(mesh));
+    } else if constexpr (dim == 2) {
       const auto [shp, map] = Omegah::getTriangleElement<order>(mesh);
       return MeshField::FieldElement(meshInfo.numTri, field, shp, map);
     } else {
@@ -350,14 +393,27 @@ public:
   /**
    * @brief create a MappedElement for a field on the given geometry
    *
-   * @param field the Lagrange field to evaluate
-   * @param geomElem the geometry element: makeElement of a coordinate field
+   * @param field the Lagrange or Bell field to evaluate
+   * @param geomElem the geometry element: makeElement of a coordinate field,
+   * which must be linear for a Bell field
    */
   template <typename ShapeField, typename GeomElem>
   auto makeElement(const ShapeField &field, const GeomElem &geomElem) const {
-    return MeshField::MappedElement(makeElement(field), geomElem);
+    if constexpr (isBell<ShapeField>()) {
+      return MeshField::MappedElement(makeElement(field), geomElem,
+                                      MeshField::BellDofTransformation());
+    } else {
+      return MeshField::MappedElement(makeElement(field), geomElem);
+    }
   }
 
+private:
+  template <typename ShapeField> static constexpr bool isBell() {
+    return std::is_same_v<decltype(std::declval<ShapeField>().shape),
+                          MeshField::BellTriangleShape>;
+  }
+
+public:
   // FIXME support 2d and 3d and fields with order>1
   template <typename Field> void writeVtk(Field &field) const {
     using FieldDataType = typename decltype(field.vtxField)::BaseType;
