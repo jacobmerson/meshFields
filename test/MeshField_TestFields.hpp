@@ -7,7 +7,7 @@
  * check a Field or a Kokkos::View of any rank, shared by the controller tests
  */
 
-#include "MeshField_TestHarness.hpp"
+#include "MeshField_TestCommon.hpp"
 #include <MeshField_Field.hpp>
 #include <MeshField_For.hpp>
 #include <MeshField_Reduce.hpp>

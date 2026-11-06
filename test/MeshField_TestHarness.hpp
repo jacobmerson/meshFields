@@ -3,160 +3,75 @@
 
 /**
  * @file MeshField_TestHarness.hpp
- * @brief a test runner, reporting, and integrators shared by the tests
+ * @brief Catch2 test configuration, mesh construction, and device helpers
  *
- * A test's main creates a TestRunner and loops over controllers, meshes, and
- * types (e.g., element factories) with its forEach functions.  The loop
- * bodies are template lambdas:
+ * Kokkos and Omega_h are initialized once in catchMain.cpp. Controller
+ * policies and mesh configurations are ordinary types, shared through Catch2
+ * type lists. Each configuration is independently registered with Catch2.
  *
- * @code
- * TestRunner t(argc, argv);
- * t.forEachController([&]<template <typename...> typename Controller>() {
- *   t.forEachMesh([&]<size_t dim>(Omega_h::Mesh &mesh) {
- *     testSomething<dim, Controller>(mesh);
- *   });
- * });
- * return t.exitCode();
- * @endcode
- *
- * Tests report each check with report(), which prefixes the controller and
- * mesh being run and counts the failures for exitCode().
- *
- * nvcc does not allow a KOKKOS_LAMBDA inside a template lambda, so device code
- * goes in named test functions or functors, not in the loop bodies.
+ * nvcc does not allow a KOKKOS_LAMBDA in a Catch2 test case body (a function
+ * in an anonymous namespace), so device code goes in named test functions or
+ * functors.
  */
 
-#include "KokkosController.hpp"
-#include "MeshField.hpp"
-#include "MeshField_Integrate.hpp"
-#ifdef MESHFIELDS_ENABLE_CABANA
-#include "CabanaController.hpp"
-#endif
+#include "MeshField_TestCommon.hpp"
 #include "Omega_h_build.hpp"
-#include <Kokkos_Core.hpp>
-#include <iostream>
-#include <string>
-#include <vector>
+#include <catch2/catch_template_test_macros.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <tuple>
 
-using ExecutionSpace = Kokkos::DefaultExecutionSpace;
+/** @brief the Omega_h library created in main */
+Omega_h::Library &library();
 
-namespace detail {
-/** the controller, mesh, etc. being run, printed by report() */
-inline std::vector<std::string> context;
-inline int numFailed = 0;
+/** @brief the unit square of triangles or the 1x2x3 box of tetrahedra */
+template <size_t dim> Omega_h::Mesh buildMesh() {
+  static_assert(dim == 2 || dim == 3);
+  if constexpr (dim == 2)
+    return Omega_h::build_box(library().world(), OMEGA_H_SIMPLEX, 1.0, 1.0, 0.0,
+                              3, 3, 0);
+  else
+    return Omega_h::build_box(library().world(), OMEGA_H_SIMPLEX, 1.0, 2.0, 3.0,
+                              2, 2, 2);
+}
 
-/** adds a label to the context for its lifetime */
-struct ContextScope {
-  ContextScope(std::string const &label) { context.push_back(label); }
-  ~ContextScope() { context.pop_back(); }
+// Preserve debug validation without leaking a test's setting into later cases.
+struct ScopedMeshFieldDebug {
+  bool previous = MeshField::Debug;
+  ScopedMeshFieldDebug() { MeshField::Debug = true; }
+  ~ScopedMeshFieldDebug() { MeshField::Debug = previous; }
 };
-} // namespace detail
 
-/**
- * @brief print the result of a check, prefixed by the context, and count it
- * if it failed
- * @return true if the check passed
- */
-inline bool report(std::string const &name, MeshField::LO numErrors) {
-  const bool pass = numErrors == 0;
-  if (!detail::context.empty()) {
-    std::cout << "[";
-    for (size_t i = 0; i < detail::context.size(); ++i)
-      std::cout << (i ? ", " : "") << detail::context[i];
-    std::cout << "] ";
-  }
-  std::cout << name << ": "
-            << (pass ? "pass" : std::to_string(numErrors) + " errors FAIL")
-            << "\n";
-  if (!pass)
-    ++detail::numFailed;
-  return pass;
-}
-
-/** @brief call f.template operator()<T>() for each T */
-template <typename... Ts, typename F> void forEachType(F &&f) {
-  (f.template operator()<Ts>(), ...);
-}
-
-/**
- * @brief initializes Kokkos and Omega_h for its lifetime, and runs tests with
- * each controller and mesh
- */
-class TestRunner {
-public:
-  TestRunner(int &argc, char **&argv)
-      : kokkos(argc, argv), lib(&argc, &argv) {}
-
-  Omega_h::Library &library() { return lib; }
-
-  /**
-   * @brief call f.template operator()<Controller>() with the Kokkos
-   * controller and, if enabled, the Cabana controller
-   */
-  template <typename F> void forEachController(F &&f) {
-    {
-      detail::ContextScope scope("Kokkos");
-      f.template operator()<MeshField::KokkosController>();
-    }
+// Controller policies avoid passing template-template parameters through
+// Catch2's signature macros (and needing an unused execution-space argument).
+struct KokkosBackend {
+  template <typename... Ts>
+  using Controller = MeshField::KokkosController<Ts...>;
+};
+struct NoParameters {};
+template <typename Backend, size_t D, typename Parameters = NoParameters>
+struct MeshCase : Backend, Parameters {
+  static constexpr size_t dim = D;
+};
+template <typename Parameters = NoParameters>
+using Kokkos2D = MeshCase<KokkosBackend, 2, Parameters>;
+template <typename Parameters = NoParameters>
+using Kokkos3D = MeshCase<KokkosBackend, 3, Parameters>;
 #ifdef MESHFIELDS_ENABLE_CABANA
-    {
-      detail::ContextScope scope("Cabana");
-      f.template operator()<MeshField::CabanaController>();
-    }
+struct CabanaBackend {
+  template <typename... Ts>
+  using Controller = MeshField::CabanaController<Ts...>;
+};
+template <typename Parameters = NoParameters>
+using Cabana2D = MeshCase<CabanaBackend, 2, Parameters>;
+template <typename Parameters = NoParameters>
+using Cabana3D = MeshCase<CabanaBackend, 3, Parameters>;
+using ControllerCases = std::tuple<KokkosBackend, CabanaBackend>;
+using MeshCases = std::tuple<Kokkos2D<>, Kokkos3D<>, Cabana2D<>, Cabana3D<>>;
+#define MESHFIELD_MESH_CASE_TEMPLATES Kokkos2D, Kokkos3D, Cabana2D, Cabana3D
+#else
+using ControllerCases = std::tuple<KokkosBackend>;
+using MeshCases = std::tuple<Kokkos2D<>, Kokkos3D<>>;
+#define MESHFIELD_MESH_CASE_TEMPLATES Kokkos2D, Kokkos3D
 #endif
-  }
-
-  /**
-   * @brief call f.template operator()<dim>(mesh) with the unit square of
-   * triangles and the 1x2x3 box of tetrahedra
-   */
-  template <typename F> void forEachMesh(F &&f) {
-    {
-      detail::ContextScope scope("2d tris");
-      auto tris = Omega_h::build_box(lib.world(), OMEGA_H_SIMPLEX, 1.0, 1.0,
-                                     0.0, 3, 3, 0);
-      f.template operator()<2>(tris);
-    }
-    {
-      detail::ContextScope scope("3d tets");
-      auto tets = Omega_h::build_box(lib.world(), OMEGA_H_SIMPLEX, 1.0, 2.0,
-                                     3.0, 2, 2, 2);
-      f.template operator()<3>(tets);
-    }
-  }
-
-  /** @brief print a summary; the exit code for main */
-  int exitCode() const {
-    if (detail::numFailed) {
-      std::cerr << detail::numFailed << " check(s) failed\n";
-      return 1;
-    }
-    std::cout << "all tests passed\n";
-    return 0;
-  }
-
-private:
-  Kokkos::ScopeGuard kokkos;
-  Omega_h::Library lib;
-};
-
-/** @brief compute the measure (3D volume, 2D area, 1D length) */
-class MeasureIntegrator : public MeshField::Integrator {
-public:
-  MeasureIntegrator(int order) : MeshField::Integrator(order) {}
-  void atPoints(Kokkos::View<MeshField::Real **>,
-                Kokkos::View<MeshField::Real *> w,
-                Kokkos::View<MeshField::Real *> dV) override {
-    MeshField::Real sum = 0;
-    Kokkos::parallel_reduce(
-        "integrateMeasure", w.extent(0),
-        KOKKOS_LAMBDA(const int i, MeshField::Real &lsum) {
-          lsum += w(i) * dV(i);
-        },
-        sum);
-    measure += sum;
-  }
-  MeshField::Real measure = 0;
-};
 
 #endif

@@ -1,6 +1,5 @@
-#include "MeshField_TestFunctions.hpp"
 #include "MeshField_TestHarness.hpp"
-#include <string>
+#include "MeshField_TestFunctions.hpp"
 
 using MeshField::Real;
 
@@ -24,7 +23,7 @@ template <size_t dim> Kokkos::View<Real **> offNodeCoords(size_t numElems) {
  * is on a shared entity
  */
 template <size_t dim, size_t order, template <typename...> typename Controller>
-bool testOwnership(
+void testOwnership(
     Omega_h::Mesh &mesh,
     MeshField::OmegahMeshField<ExecutionSpace, dim, Controller> &omf) {
   auto fieldWithCtrlr = omf.template CreateLagrangeField<Real, order, 1>();
@@ -55,7 +54,7 @@ bool testOwnership(
         lerrorsDim);
     numErrors += lerrorsDim;
   }
-  return report("testOwnership(P" + std::to_string(order) + ")", numErrors);
+  CHECK(numErrors == 0);
 }
 
 /*
@@ -64,10 +63,10 @@ bool testOwnership(
  */
 template <size_t dim, size_t order, typename CoordinateMap,
           template <typename...> typename Controller>
-bool testCoordinateMap(
+void testCoordinateMap(
     Omega_h::Mesh &mesh,
     MeshField::OmegahMeshField<ExecutionSpace, dim, Controller> &omf,
-    CoordinateMap const &coordMap, std::string const &name) {
+    CoordinateMap const &coordMap) {
   auto mappedWithCtrlr =
       omf.template CreateLagrangeCoordinateField<order>(coordMap);
   auto mapped = omf.CreateLagrangeElement(mappedWithCtrlr.field);
@@ -88,24 +87,26 @@ bool testCoordinateMap(
             ++lerrors;
       },
       numErrors);
-  return report(
-      "testCoordinateMap(P" + std::to_string(order) + ", " + name + ")",
-      numErrors);
+  CHECK(numErrors == 0);
 }
 
-int main(int argc, char **argv) {
-  TestRunner t(argc, argv);
-  t.forEachController([&]<template <typename...> typename Controller>() {
-    t.forEachMesh([&]<size_t dim>(Omega_h::Mesh &mesh) {
-      MeshField::OmegahMeshField<ExecutionSpace, dim, Controller> omf(mesh);
-      testOwnership<dim, 1>(mesh, omf);
-      testOwnership<dim, 2>(mesh, omf);
-      testCoordinateMap<dim, 2>(mesh, omf, MeshField::IdentityCoordinateMap(),
-                                "identity");
-      testCoordinateMap<dim, 1>(mesh, omf, Shear<dim>(), "shear");
-      testCoordinateMap<dim, 2>(mesh, omf, Shear<dim>(), "shear");
-      testCoordinateMap<dim, 2>(mesh, omf, Bend<dim>(), "bend");
-    });
-  });
-  return t.exitCode();
+TEMPLATE_LIST_TEST_CASE("interpolation", "[interpolate]", MeshCases) {
+  constexpr size_t dim = TestType::dim;
+  auto mesh = buildMesh<dim>();
+  MeshField::OmegahMeshField<ExecutionSpace, dim, TestType::template Controller>
+      omf(mesh);
+  SECTION("ownership P1") { testOwnership<dim, 1>(mesh, omf); }
+  SECTION("ownership P2") { testOwnership<dim, 2>(mesh, omf); }
+  SECTION("coordinate map P2 identity") {
+    testCoordinateMap<dim, 2>(mesh, omf, MeshField::IdentityCoordinateMap());
+  }
+  SECTION("coordinate map P1 shear") {
+    testCoordinateMap<dim, 1>(mesh, omf, Shear<dim>());
+  }
+  SECTION("coordinate map P2 shear") {
+    testCoordinateMap<dim, 2>(mesh, omf, Shear<dim>());
+  }
+  SECTION("coordinate map P2 bend") {
+    testCoordinateMap<dim, 2>(mesh, omf, Bend<dim>());
+  }
 }

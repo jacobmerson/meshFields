@@ -12,6 +12,7 @@
 // then writes to it and evaluates it.  Under ASan the bug shows as a
 // heap-use-after-free.
 #include "MeshField_TestHarness.hpp"
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 using MeshField::LO;
 using MeshField::Real;
@@ -64,14 +65,11 @@ template <template <typename...> typename Controller> void testLifetime() {
   const auto result_h =
       Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), result);
   // f at the centroid (1/3, 1/3)
-  report("testLifetime",
-         !(std::fabs(result_h(0, 0) - 1.0) <= MeshField::Epsilon));
+  CHECK_THAT(result_h(0, 0),
+             Catch::Matchers::WithinAbs(1.0, MeshField::Epsilon));
 }
 
-int main(int argc, char **argv) {
-  TestRunner t(argc, argv);
-  t.forEachController([&]<template <typename...> typename Controller>() {
-    testLifetime<Controller>();
-  });
-  return t.exitCode();
+TEMPLATE_LIST_TEST_CASE("field outlives the function that created it",
+                        "[lifetime]", ControllerCases) {
+  testLifetime<TestType::template Controller>();
 }

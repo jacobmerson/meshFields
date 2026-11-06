@@ -1,4 +1,5 @@
 #include "MeshField_TestHarness.hpp"
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -27,7 +28,6 @@ template <size_t dim> struct SimplexToVertexField {
 };
 
 template <size_t dim> struct JacobianCase {
-  std::string name;
   /** vertex coordinates, [vertex * dim + direction] */
   std::vector<Real> coords;
   /** J[i][j] = dx_j/dxi_i, [i * dim + j] */
@@ -41,8 +41,6 @@ template <size_t dim> struct JacobianCase {
  */
 template <size_t dim, template <typename...> typename Controller>
 void testJacobian(JacobianCase<dim> const &tc) {
-  const std::string name =
-      "testJacobian(" + std::to_string(dim) + "d, " + tc.name + ")";
   constexpr LO numVtx = dim + 1;
   const MeshField::MeshInfo meshInfo{.numVtx = numVtx, .dim = dim};
   auto coordFieldWithCtrlr =
@@ -71,45 +69,49 @@ void testJacobian(JacobianCase<dim> const &tc) {
   Kokkos::deep_copy(lc, 1.0 / (dim + 1));
   const auto J = MeshField::getJacobians(elm, lc, 1);
   const auto J_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), J);
-  if (J_h.extent(0) != 1 || J_h.extent(1) != dim || J_h.extent(2) != dim) {
-    report(name + " extents", 1);
-    return;
-  }
-  LO errors = 0;
+  REQUIRE(J_h.extent(0) == 1);
+  REQUIRE(J_h.extent(1) == dim);
+  REQUIRE(J_h.extent(2) == dim);
+  using Catch::Matchers::WithinAbs;
   for (size_t i = 0; i < dim; ++i)
-    for (size_t j = 0; j < dim; ++j)
-      if (!(std::fabs(J_h(0, i, j) - tc.jacobian[i * dim + j]) <=
-            MeshField::MachinePrecision))
-        ++errors;
+    for (size_t j = 0; j < dim; ++j) {
+      CAPTURE(i, j);
+      CHECK_THAT(J_h(0, i, j), WithinAbs(tc.jacobian[i * dim + j],
+                                         MeshField::MachinePrecision));
+    }
   // getJacobianDeterminants does not support 1d yet
   if constexpr (dim > 1) {
     const auto det = MeshField::getJacobianDeterminants(elm, J);
     const auto det_h =
         Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), det);
-    if (det_h.extent(0) != 1 ||
-        !(std::fabs(det_h(0) - tc.determinant) <= MeshField::MachinePrecision))
-      ++errors;
+    REQUIRE(det_h.extent(0) == 1);
+    CHECK_THAT(det_h(0),
+               WithinAbs(tc.determinant, MeshField::MachinePrecision));
   }
-  report(name, errors);
 }
 
-int main(int argc, char **argv) {
-  TestRunner t(argc, argv);
-  t.forEachController([&]<template <typename...> typename Controller>() {
-    testJacobian<1, Controller>({"edge", {-1, 1}, {1}, 1});
-    testJacobian<2, Controller>(
-        {"right triangle", {0, 0, 1, 0, 0, 1}, {1, 0, 0, 1}, 1});
-    testJacobian<2, Controller>(
-        {"skewed triangle", {0, 0, 5, 1, 3, 4}, {5, 1, 3, 4}, 17});
-    testJacobian<3, Controller>({"right tetrahedron",
-                                 {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1},
-                                 {1, 0, 0, 0, 1, 0, 0, 0, 1},
-                                 1});
-    // the vertices are ordered left handed, so the determinant is negative
-    testJacobian<3, Controller>({"skewed tetrahedron",
-                                 {0, 0, 0, 5, 1, 2, 3, 4, 6, 10, 8, 9},
-                                 {5, 1, 2, 3, 4, 6, 10, 8, 9},
-                                 -59});
-  });
-  return t.exitCode();
+TEMPLATE_LIST_TEST_CASE("Jacobian of a linear simplex", "[jacobian]",
+                        ControllerCases) {
+  SECTION("edge") {
+    testJacobian<1, TestType::template Controller>({{-1, 1}, {1}, 1});
+  }
+  SECTION("right triangle") {
+    testJacobian<2, TestType::template Controller>(
+        {{0, 0, 1, 0, 0, 1}, {1, 0, 0, 1}, 1});
+  }
+  SECTION("skewed triangle") {
+    testJacobian<2, TestType::template Controller>(
+        {{0, 0, 5, 1, 3, 4}, {5, 1, 3, 4}, 17});
+  }
+  SECTION("right tetrahedron") {
+    testJacobian<3, TestType::template Controller>(
+        {{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1}, {1, 0, 0, 0, 1, 0, 0, 0, 1}, 1});
+  }
+  // the vertices are ordered left handed, so the determinant is negative
+  SECTION("skewed tetrahedron") {
+    testJacobian<3, TestType::template Controller>(
+        {{0, 0, 0, 5, 1, 2, 3, 4, 6, 10, 8, 9},
+         {5, 1, 2, 3, 4, 6, 10, 8, 9},
+         -59});
+  }
 }

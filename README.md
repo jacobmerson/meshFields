@@ -220,6 +220,12 @@ Run the build script:
 
 ## build meshFields
 
+Catch2 3 is required for the default controller smoke tests and the full test
+suite. Set `Catch2_ROOT` or add its installation to `CMAKE_PREFIX_PATH`.
+`-DMeshFields_IS_TESTING=ON` enables the full suite; `-DBUILD_TESTING=OFF`
+builds the library without tests or a Catch2 dependency. Benchmarks are opt-in
+with `-DMeshFields_BUILD_BENCHMARKS=ON` and also require Catch2.
+
 The following assumes that the environment is already setup (see above, either CPU or GPU) and the
 `root` directory is the same directory used to build the dependencies.
 
@@ -257,6 +263,66 @@ Alternatively, you can cd into the build directory and run `ctest` directly:
 cd build-meshFields-cuda 
 ctest
 ```
+
+## Build and run the Catch2 tests with Spack
+
+The `spack/cpu` and `spack/cuda` environments use the existing SCOREC
+`meshfields` package recipe and set this checkout as its development path.
+Catch2 is an additional environment root; the build helper passes its CMake
+location and enables the full test suite explicitly. No custom package recipe or
+changes to the shared Spack repository are needed.
+
+These manifests pin dependencies already installed on the SCOREC workstation:
+Kokkos 4.7.04, matching Cabana/Omega_h/Kokkos Kernels, Catch2 3.8.0, and GCC
+12.3.0. The CUDA environment targets Turing (`cuda_arch=75`, RTX 2060).
+On another machine, replace the installed dependency hashes and CUDA
+architecture with compatible local specs before concretizing. Enable CUDA
+lambdas in Kokkos and use its `nvcc_wrapper` for the CUDA build.
+
+With Spack available in your shell, run from this checkout:
+
+```bash
+spack -e spack/cuda concretize
+# The pinned dependencies are already installed; no spack install is needed.
+tools/test-with-spack.sh cuda configure
+tools/test-with-spack.sh cuda build
+tools/test-with-spack.sh cuda test
+tools/test-with-spack.sh cuda benchmark
+```
+
+Use `cpu` instead of `cuda` for the OpenMP build. `all` runs all four steps;
+`BUILD_JOBS=4` overrides the default two compilation jobs. Both builds use
+Release optimization. The helper defaults `OMP_NUM_THREADS` to two; set it
+explicitly to compare CPU thread counts. The CUDA build can compile without a
+GPU; Catch2's CTest discovery runs at test time, when a GPU must be available.
+The helper runs CTest serially so cases do not compete for the same GPU.
+
+To select the test suite or a specific set of cases:
+
+```bash
+spack -e spack/cuda build-env meshfields -- \
+  ctest --test-dir build-cuda -L 'meshfields::base' --output-on-failure
+spack -e spack/cuda build-env meshfields -- \
+  ./build-cuda/Reproduction '[reproduction]' --order rand --rng-seed 123
+```
+
+If `ctest` is not on your shell's PATH, use the binary under
+`$(spack -e spack/cuda location -i cmake@3.31.12)/bin/ctest` as the helper does.
+Controller ranks and reproduction configurations are separate registered
+cases. Sections and runtime-generated inputs remain within their parent case.
+The exception assertions run only with `MeshFields_USE_EXCEPTIONS=ON`; the
+same cases run as expected-failure process tests when exceptions are disabled.
+The SPR adaptation checks run through Catch2 in serial and, with MPI enabled,
+with two processes.
+
+`ControllerBenchmark` demonstrates Catch2's `BENCHMARK` macro for writing
+65,536 three-component coordinates through Kokkos and Cabana fields. It
+allocates and warms up outside the measured region, checks results before and
+after timing, and fences **inside every iteration**. GPU timings therefore
+include kernel launch and completion. They are a small end-to-end example,
+not a bandwidth study. Benchmarks are hidden from ordinary Catch2 runs and
+are not registered as CTest correctness tests. Select them explicitly with
+`'[!benchmark]'`; the helper collects 20 samples.
 
 ## build and run meshFields tests on CPU for coverage
 

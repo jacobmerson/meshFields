@@ -1,7 +1,6 @@
+#include "MeshField_TestHarness.hpp"
 #include "MeshField_MappedElement.hpp"
 #include "MeshField_TestFunctions.hpp"
-#include "MeshField_TestHarness.hpp"
-#include <string>
 
 // MappedElement physical gradients on curved P2 geometry, against central
 // differences, on triangles and tetrahedra.  The meshes are sheared so the
@@ -29,13 +28,13 @@ template <size_t dim> KOKKOS_INLINE_FUNCTION Vec<dim> point(int pt) {
 // physical gradients on curved geometry agree with central differences
 template <size_t dim, size_t FieldOrder,
           template <typename...> typename Controller>
-bool testCurvedGradientFiniteDifference(Omega_h::Mesh &mesh,
+void testCurvedGradientFiniteDifference(Omega_h::Mesh &mesh,
                                         OmegahMeshField<dim, Controller> &omf) {
   QuadraticFunction<dim> func;
   // sheared, then curved by a smooth offset
   const MeshField::Real s = 0.03;
-  auto cfWc = omf.template CreateLagrangeCoordinateField<2>(
-      KOKKOS_LAMBDA(Vec<dim> x) {
+  auto cfWc =
+      omf.template CreateLagrangeCoordinateField<2>(KOKKOS_LAMBDA(Vec<dim> x) {
         x = Shear<dim>()(x);
         auto y = x;
         for (size_t d = 0; d < dim; ++d)
@@ -46,9 +45,10 @@ bool testCurvedGradientFiniteDifference(Omega_h::Mesh &mesh,
       omf.template CreateLagrangeField<MeshField::Real, FieldOrder, 1>();
   auto geomElm = omf.CreateLagrangeElement(cfWc.field);
   auto elm = omf.CreateLagrangeElement(fieldWc.field, geomElm);
-  MeshField::setDofByInterpolation(elm, KOKKOS_LAMBDA(Vec<dim> const &x) {
-    return valueScaledByComponent<1>(func, x);
-  });
+  MeshField::setDofByInterpolation(
+      elm, KOKKOS_LAMBDA(Vec<dim> const &x) {
+        return valueScaledByComponent<1>(func, x);
+      });
   auto coordElm = omf.CreateLagrangeElement(cfWc.field, geomElm);
 
   const MeshField::Real h = 1e-5;
@@ -81,20 +81,15 @@ bool testCurvedGradientFiniteDifference(Omega_h::Mesh &mesh,
         }
       },
       errors);
-  return report("testCurvedGradientFiniteDifference(P" +
-                    std::to_string(FieldOrder) + ")",
-                errors);
+  CHECK(errors == 0);
 }
 
-int main(int argc, char **argv) {
-  TestRunner t(argc, argv);
-  MeshField::Debug = true;
-  t.forEachController([&]<template <typename...> typename Controller>() {
-    t.forEachMesh([&]<size_t dim>(Omega_h::Mesh &mesh) {
-      OmegahMeshField<dim, Controller> omf(mesh);
-      testCurvedGradientFiniteDifference<dim, 1, Controller>(mesh, omf);
-      testCurvedGradientFiniteDifference<dim, 2, Controller>(mesh, omf);
-    });
-  });
-  return t.exitCode();
+TEMPLATE_LIST_TEST_CASE("MappedElement curved gradient vs finite difference",
+                        "[mapped]", MeshCases) {
+  constexpr size_t dim = TestType::dim;
+  ScopedMeshFieldDebug debug;
+  auto mesh = buildMesh<dim>();
+  OmegahMeshField<dim, TestType::template Controller> omf(mesh);
+  SECTION("P1") { testCurvedGradientFiniteDifference<dim, 1>(mesh, omf); }
+  SECTION("P2") { testCurvedGradientFiniteDifference<dim, 2>(mesh, omf); }
 }

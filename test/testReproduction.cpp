@@ -1,13 +1,13 @@
+#include "MeshField_TestHarness.hpp"
 #include "MeshField_MappedElement.hpp"
 #include "MeshField_TestFunctions.hpp"
-#include "MeshField_TestHarness.hpp"
-#include <string>
 #include <utility>
 
 // Interpolate (c+1) f into each component c of a field, for each element type,
 // on affine geometry, and check that
 //  - the values at the element's nodes are (c+1) f, for any f
-//  - (c+1) f  and gradient is reproduced in the element interior when the field's order is at least
+//  - (c+1) f  and gradient is reproduced in the element interior when the
+//  field's order is at least
 //    the degree of f
 
 using MeshField::LO;
@@ -15,7 +15,6 @@ using MeshField::Real;
 
 // a FieldElement
 struct Lagrange {
-  static constexpr const char *name = "FieldElement";
   template <size_t order, size_t numComp, typename Omf, typename GeomElem>
   static auto make(Omf &omf, GeomElem const &) {
     auto fieldWithCtrlr =
@@ -28,7 +27,6 @@ struct Lagrange {
 
 // a MappedElement on the geometry
 struct Mapped {
-  static constexpr const char *name = "MappedElement";
   template <size_t order, size_t numComp, typename Omf, typename GeomElem>
   static auto make(Omf &omf, GeomElem const &geom) {
     auto fieldWithCtrlr =
@@ -71,8 +69,7 @@ KOKKOS_INLINE_FUNCTION LO gradientErrors(Elm const &elm, Coefficients const &c,
 template <size_t dim, template <typename...> typename Controller,
           typename Element, size_t order, size_t numComp, typename Function,
           typename CoordinateMap>
-void testReproduction(Omega_h::Mesh &mesh, CoordinateMap const &coordMap,
-                      std::string const &mapName) {
+void testReproduction(Omega_h::Mesh &mesh, CoordinateMap const &coordMap) {
   MeshField::OmegahMeshField<ExecutionSpace, dim, Controller> omf(mesh);
   auto coordsWithCtrlr =
       omf.template CreateLagrangeCoordinateField<1>(coordMap);
@@ -125,45 +122,43 @@ void testReproduction(Omega_h::Mesh &mesh, CoordinateMap const &coordMap,
         }
       },
       errors);
-  report("testReproduction(P" + std::to_string(order) + ", " +
-             std::to_string(numComp) + " comp, degree " +
-             std::to_string(Function::degree) + " f, " + mapName + ", " +
-             Element::name + ")",
-         errors);
+  INFO("P" << order << ", " << numComp << " comp, degree " << Function::degree
+           << " f");
+  CHECK(errors == 0);
 }
 
-template <size_t dim, template <typename...> typename Controller,
-          typename Element, typename CoordinateMap>
-void testOrders(Omega_h::Mesh &mesh, CoordinateMap const &coordMap,
-                std::string const &mapName) {
-  using Linear = LinearFunction<dim>;
-  using Quadratic = QuadraticFunction<dim>;
-  testReproduction<dim, Controller, Element, 1, 1, Linear>(mesh, coordMap,
-                                                           mapName);
-  testReproduction<dim, Controller, Element, 1, 3, Linear>(mesh, coordMap,
-                                                           mapName);
-  // the order is too low to reproduce f, so only the nodes are checked
-  testReproduction<dim, Controller, Element, 1, 1, Quadratic>(mesh, coordMap,
-                                                              mapName);
-  testReproduction<dim, Controller, Element, 2, 1, Linear>(mesh, coordMap,
-                                                           mapName);
-  testReproduction<dim, Controller, Element, 2, 1, Quadratic>(mesh, coordMap,
-                                                              mapName);
-  testReproduction<dim, Controller, Element, 2, 3, Quadratic>(mesh, coordMap,
-                                                              mapName);
+template <size_t Order, size_t Components, template <size_t> typename F>
+struct ReproductionParameters {
+  static constexpr size_t order = Order;
+  static constexpr size_t components = Components;
+  template <size_t D> using Function = F<D>;
+};
+
+template <typename Case, typename Element> void testMaps(Omega_h::Mesh &mesh) {
+  using Function = typename Case::template Function<Case::dim>;
+  SECTION("identity") {
+    testReproduction<Case::dim, Case::template Controller, Element, Case::order,
+                     Case::components, Function>(
+        mesh, MeshField::IdentityCoordinateMap());
+  }
+  SECTION("shear") {
+    testReproduction<Case::dim, Case::template Controller, Element, Case::order,
+                     Case::components, Function>(mesh, Shear<Case::dim>());
+  }
 }
 
-int main(int argc, char **argv) {
-  TestRunner t(argc, argv);
-  MeshField::Debug = true;
-  t.forEachController([&]<template <typename...> typename Controller>() {
-    t.forEachMesh([&]<size_t dim>(Omega_h::Mesh &mesh) {
-      forEachType<Lagrange, Mapped>([&]<typename Element>() {
-        testOrders<dim, Controller, Element>(
-            mesh, MeshField::IdentityCoordinateMap(), "identity");
-        testOrders<dim, Controller, Element>(mesh, Shear<dim>(), "shear");
-      });
-    });
-  });
-  return t.exitCode();
+// Preserve the six supported cases, including P1 interpolation of a quadratic
+// (nodes only), rather than introducing an unrestricted Cartesian product.
+TEMPLATE_PRODUCT_TEST_CASE(
+    "reproduction", "[reproduction]", (MESHFIELD_MESH_CASE_TEMPLATES),
+    ((ReproductionParameters<1, 1, LinearFunction>),
+     (ReproductionParameters<1, 3, LinearFunction>),
+     (ReproductionParameters<1, 1, QuadraticFunction>),
+     (ReproductionParameters<2, 1, LinearFunction>),
+     (ReproductionParameters<2, 1, QuadraticFunction>),
+     (ReproductionParameters<2, 3, QuadraticFunction>))) {
+  ScopedMeshFieldDebug debug;
+  auto mesh = buildMesh<TestType::dim>();
+  SECTION("FieldElement") { testMaps<TestType, Lagrange>(mesh); }
+  SECTION("MappedElement") { testMaps<TestType, Mapped>(mesh); }
 }
